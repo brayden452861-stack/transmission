@@ -1,38 +1,56 @@
 param([Parameter(Mandatory=$true)][string]$File)
+$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$cfg = @{}
-Get-Content (Join-Path $PSScriptRoot 'sender.cfg') | ForEach-Object { if ($_ -match '^\s*(\w+)\s*=\s*(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() } }
-if (-not $cfg.token -or $cfg.token -match 'PASTE') { Write-Host 'Put your GitHub token in sender\sender.cfg first (see README).' -ForegroundColor Red; exit 1 }
-if (-not (Test-Path $File)) { Write-Host "File not found: $File" -ForegroundColor Red; exit 1 }
-$ext = [IO.Path]::GetExtension($File).ToLower()
-if ($ext -notin '.mp3','.mp4') { Write-Host 'Only .mp3 and .mp4 files.' -ForegroundColor Red; exit 1 }
-$sizeMB = (Get-Item $File).Length / 1MB
-if ($sizeMB -gt 50) { Write-Host ("That file is {0:N0} MB. GitHub mode allows 50 MB - shrink it first." -f $sizeMB) -ForegroundColor Red; exit 1 }
-$caption = Read-Host 'Caption to show on screen (press Enter to skip)'
-$repo = $cfg.repo; $br = if ($cfg.branch) { $cfg.branch } else { 'main' }
-$h = @{ Authorization = "Bearer $($cfg.token)"; 'User-Agent' = 'nova6-sender'; Accept = 'application/vnd.github+json' }
-$id = [guid]::NewGuid().ToString('N').Substring(0,10)
-$fname = "$id$ext"
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}   # older Windows PowerShell defaults to TLS 1.0, which GitHub refuses
+$log = Join-Path $PSScriptRoot 'last_error.txt'
 try {
-  Write-Host ("Transmitting {0} ({1:N1} MB) ..." -f [IO.Path]::GetFileName($File), $sizeMB)
+  $cfgPath = Join-Path $PSScriptRoot 'sender.cfg'
+  if (-not (Test-Path $cfgPath)) { throw "sender.cfg not found. It must sit in the same folder as send.bat." }
+  $cfg = @{}
+  Get-Content $cfgPath | ForEach-Object { if ($_ -match '^\s*(\w+)\s*=\s*(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() } }
+  if (-not $cfg.token -or $cfg.token -match 'PASTE') { throw "Put your GitHub token in sender.cfg (token=...)." }
+  $File = (Resolve-Path -LiteralPath $File).Path
+  $ext = [IO.Path]::GetExtension($File).ToLower()
+  if ($ext -ne '.mp3' -and $ext -ne '.mp4') { throw "Only .mp3 and .mp4 files (got '$ext')." }
+  $len = (Get-Item -LiteralPath $File).Length
+  $sizeMB = $len / 1MB
+  if ($sizeMB -gt 50) { throw ("That file is {0:N0} MB. GitHub mode allows 50 MB - shrink it first." -f $sizeMB) }
+  $caption = Read-Host 'Caption to show on screen (press Enter to skip)'
+  $repo = $cfg.repo; $br = if ($cfg.branch) { $cfg.branch } else { 'main' }
+  $h = @{ Authorization = "Bearer $($cfg.token)"; 'User-Agent' = 'nova6-sender'; Accept = 'application/vnd.github+json' }
+  $id = [guid]::NewGuid().ToString('N').Substring(0,10)
+  $fname = "$id$ext"
+
+  Write-Host ("Uploading {0} ({1:N1} MB) to {2} ..." -f [IO.Path]::GetFileName($File), $sizeMB, $repo)
   $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($File))
-  $body = @{ message = "transmission $id"; content = $b64; branch = $br } | ConvertTo-Json
+  # build the JSON by hand: ConvertTo-Json chokes on very large strings
+  $body = '{"message":"transmission ' + $id + '","branch":"' + $br + '","content":"' + $b64 + '"}'
   Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/media/$fname" -Method Put -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' -TimeoutSec 3600 | Out-Null
-  for ($try = 0; $try -lt 5; $try++) {                      # add to manifest (retry if two sends collide)
+  $body = $null; $b64 = $null; [GC]::Collect()
+
+  Write-Host 'File uploaded. Adding it to the transmission list ...'
+  $type = if ($ext -eq '.mp4') { 'video' } else { 'audio' }
+  $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $capJson = ($caption | ConvertTo-Json -Compress); if (-not $capJson) { $capJson = '""' }
+  $newItem = '{"id":"' + $id + '","file":"' + $fname + '","type":"' + $type + '","caption":' + $capJson + ',"ts":' + $ts + '}'
+  for ($try = 0; $try -lt 5; $try++) {
     $m = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/manifest.json?ref=$br" -Headers $h
-    $cur = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($m.content -replace '\s',''))) | ConvertFrom-Json
-    $items = @(); if ($cur.items) { $items = @($cur.items) }
-    $type = if ($ext -eq '.mp4') { 'video' } else { 'audio' }
-    $items += [pscustomobject]@{ id = $id; file = $fname; type = $type; caption = $caption; ts = [int][double]::Parse((Get-Date -UFormat %s)) }
-    if ($items.Count -gt 40) { $items = $items[-40..-1] }
-    $json = (@{ items = $items } | ConvertTo-Json -Depth 5)
-    $put = @{ message = "manifest $id"; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)); sha = $m.sha; branch = $br } | ConvertTo-Json
-    try { Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/manifest.json" -Method Put -Headers $h -Body $put -ContentType 'application/json' | Out-Null; break }
-    catch { if ($try -eq 4) { throw } ; Start-Sleep -Seconds 1 }
+    $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($m.content -replace '\s',''))).TrimStart([char]0xFEFF)
+    $old = @()
+    try { $parsed = $text | ConvertFrom-Json; if ($parsed.items) { $old = @($parsed.items) } } catch {}
+    $parts = @(); foreach ($o in $old) { $parts += ($o | ConvertTo-Json -Compress) }
+    $parts += $newItem
+    if ($parts.Count -gt 40) { $parts = $parts[($parts.Count-40)..($parts.Count-1)] }
+    $json = '{"items":[' + ($parts -join ',') + ']}'
+    $put = '{"message":"manifest ' + $id + '","branch":"' + $br + '","sha":"' + $m.sha + '","content":"' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)) + '"}'
+    try { Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/manifest.json" -Method Put -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes($put)) -ContentType 'application/json' | Out-Null; break }
+    catch { if ($try -eq 4) { throw }; Start-Sleep -Seconds 1 }
   }
+  if (Test-Path $log) { Remove-Item $log -ErrorAction SilentlyContinue }
   Write-Host 'TRANSMISSION SENT. Open screens pick it up within ~15-30 seconds.' -ForegroundColor Cyan
 } catch {
   $msg = $_.Exception.Message
-  if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $msg = $_.ErrorDetails.Message }
+  if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $msg += "`n" + $_.ErrorDetails.Message }
   Write-Host "FAILED: $msg" -ForegroundColor Red
+  try { Set-Content -Path $log -Value $msg } catch {}
 }

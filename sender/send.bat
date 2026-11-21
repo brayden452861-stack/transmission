@@ -4,5 +4,6 @@ if "%~1"=="" (
   echo Drag an MP3 or MP4 file onto send.bat
   pause & exit /b
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0send.ps1" -File "%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0send.ps1" "%~1"
+echo.
 pause
