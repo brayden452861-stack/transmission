@@ -383,12 +383,12 @@
   // ids already shown on this browser are remembered, so a reload doesn't replay them; anything sent in the last 15 min that this browser hasn't shown yet plays
   let shown = new Set(); try { shown = new Set(JSON.parse(localStorage.getItem('nova6shown') || '[]')); } catch {}
   const remember = (id) => { shown.add(id); try { localStorage.setItem('nova6shown', JSON.stringify([...shown].slice(-100))); } catch {} };
-  let primed = false;
+  let primed = false, pollMs = 333, okRun = 0;      // 3 checks per second; backs off automatically if GitHub pushes back (HTTP 403/429/5xx)
   async function poll() {
     try {
       const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) {
-        dbg('poll ok'); const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
+        const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
         let hi = 0; try { hi = +localStorage.getItem('nova6intr') || 0; } catch {}
         if (intr > hi) {
           try { localStorage.setItem('nova6intr', String(intr)); } catch {}
@@ -402,9 +402,10 @@
         });
         primed = true;
       }
-      else dbg('poll HTTP ' + r.status);
-    } catch (err) { dbg('poll failed: ' + err.message); }
-    setTimeout(poll, 15000);
+      if (r.ok) { okRun++; if (okRun > 20 && pollMs > 333) pollMs = Math.max(333, pollMs / 2); }
+      else { okRun = 0; pollMs = Math.min(15000, Math.max(pollMs * 2, r.status === 429 || r.status === 403 ? 10000 : 1000)); dbg('poll HTTP ' + r.status + ', slowing to ' + pollMs + ' ms'); }
+    } catch (err) { okRun = 0; pollMs = Math.min(15000, pollMs * 2); dbg('poll failed: ' + err.message); }
+    setTimeout(poll, pollMs);
   }
   poll();
 
