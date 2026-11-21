@@ -52,6 +52,7 @@
     <div id="hud" class="abs"></div>
   </div>
 </div>
+<div id="dbg" style="position:fixed;left:6px;bottom:6px;z-index:20;font:11px monospace;color:#7fe3ee;background:rgba(0,0,0,.7);padding:4px 6px;max-width:92vw;white-space:pre-wrap;display:none"></div>
 <video id="vid" playsinline crossorigin="anonymous" preload="auto" style="display:none"></video>
 <audio id="aud" crossorigin="anonymous" preload="auto" style="display:none"></audio>
 
@@ -298,6 +299,9 @@
     get mode() { return mode; }, get jingle() { return !!alertBuf; }, get amb() { return ambGain ? ambGain.gain.value : -1; }, get loaded() { return !!ambBuf; } };
 
   // ---- queue
+  const DEBUG = /[?&]debug/.test(location.search), dbgEl = $('#dbg'), dbgLines = [];
+  if (DEBUG) dbgEl.style.display = 'block';
+  const dbg = (t) => { console.log('[nova6]', t); if (!DEBUG) return; dbgLines.push(new Date().toLocaleTimeString() + ' ' + t); if (dbgLines.length > 8) dbgLines.shift(); dbgEl.textContent = dbgLines.join('\n'); };
   const hud = $('#hud'), knob = $('#knob');
   let line = [], curr = null, count = 0, rot = 0;
   const setHud = (t) => { hud.textContent = t || ''; hud.classList.toggle('on', !!t); };
@@ -330,18 +334,24 @@
     const item = e.item; burst = 14; spin(); setAmb(false, 0.3);
     const el = item.type === 'video' ? vid : aud;
     el.src = RAW + 'media/' + item.file;
-    const done = () => { el.onended = el.onerror = null; el.pause(); el.removeAttribute('src'); el.load(); finish(e); };
+    const done = () => { clearTimeout(e.playWatch); el.muted = false; el.onended = el.onerror = null; el.pause(); el.removeAttribute('src'); el.load(); finish(e); };
     el.onended = done; el.onerror = done;
-    const go = () => setTimeout(() => {
+    const go = () => { clearTimeout(e.playWatch); dbg('playing ' + item.file); setTimeout(() => {
       if (curr !== e) return;
       mode = item.type; if (item.type === 'video') startLock();
       setHud(`TRANSMISSION ${String(count).padStart(3, '0')} // LIVE` + (item.caption ? '  ' + item.caption : ''));
-    }, 350);
+    }, 350); };
+    // watchdog: if the clip never starts (blocked, stalled download, bad file) give up so the queue can't jam
+    e.playWatch = setTimeout(() => { if (curr === e && mode !== item.type) { dbg('clip did not start, skipping ' + item.file); done(); } }, 45000);
+    const fail = (why) => { clearTimeout(e.playWatch); dbg('cannot play ' + item.file + ': ' + why); done(); };
+    el.onerror = () => fail('media error ' + (el.error ? el.error.code : '')); 
     el.play().then(go).catch(err => {
-      if (err && err.name === 'NotAllowedError') {            // browser blocks sound until first interaction: wait for it, then play
-        const retry = () => { removeEventListener('pointerdown', retry); removeEventListener('keydown', retry); if (curr === e) el.play().then(go).catch(done); };
-        addEventListener('pointerdown', retry); addEventListener('keydown', retry);
-      } else done();
+      if (err && err.name === 'NotAllowedError') {            // browser blocks sound until first interaction
+        dbg('sound blocked - click the page');
+        if (item.type === 'video') { el.muted = true; el.play().then(go).catch(() => fail('blocked')); }   // show the picture silently
+        const unmute = () => { removeEventListener('pointerdown', unmute); removeEventListener('keydown', unmute); el.muted = false; if (item.type !== 'video' && curr === e) el.play().then(go).catch(() => fail('blocked')); };
+        addEventListener('pointerdown', unmute); addEventListener('keydown', unmute);
+      } else fail(err && err.name);
     });
   }
 
@@ -378,7 +388,7 @@
     try {
       const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) {
-        const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
+        dbg('poll ok'); const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
         let hi = 0; try { hi = +localStorage.getItem('nova6intr') || 0; } catch {}
         if (intr > hi) {
           try { localStorage.setItem('nova6intr', String(intr)); } catch {}
@@ -388,11 +398,12 @@
           if (shown.has(i.id)) return;
           if ((i.ts || 0) <= intr) { remember(i.id); return; }                          // sent before the interrupt: dropped
           remember(i.id);
-          if (primed || nowS - (i.ts || 0) < 900) onMsg({ type: 'new', item: i });     // new, or sent within the last 15 minutes
+          if (primed || nowS - (i.ts || 0) < 900) dbg('queued ' + i.file), onMsg({ type: 'new', item: i });     // new, or sent within the last 15 minutes
         });
         primed = true;
       }
-    } catch {}
+      else dbg('poll HTTP ' + r.status);
+    } catch (err) { dbg('poll failed: ' + err.message); }
     setTimeout(poll, 15000);
   }
   poll();
