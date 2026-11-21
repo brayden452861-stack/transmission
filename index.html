@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NOVA6</title>
+<link rel="icon" href="data:,">
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:"Courier New",monospace}
+  #stage{position:absolute;left:0;top:0;width:701px;height:558px;transform-origin:0 0;background:#000 url(tv.png) no-repeat 0 0}
+  .abs{position:absolute}
+  /* spectrum window on the small top monitor */
+  #specwrap{left:312px;top:53px;width:212px;height:67px;background:#010607;overflow:hidden;border-radius:2px;box-shadow:inset 0 0 8px #000}
+  #spec{width:100%;height:100%;display:block;filter:blur(.5px)}
+  /* main screen */
+  #screenwrap{left:128px;top:204px;width:345px;height:276px;overflow:hidden;background:#000;border-radius:26px 28px 38px 30px}
+  canvas#screen{width:100%;height:100%;display:block;filter:blur(.35px)}
+  #glass{position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg,rgba(0,8,10,.3) 0 1px,transparent 1px 3px),
+      radial-gradient(ellipse at center,transparent 60%,rgba(0,14,18,.5) 100%);
+    box-shadow:inset 0 0 18px rgba(0,20,26,.8);animation:flick .12s infinite}
+  @keyframes flick{0%{opacity:.9}50%{opacity:1}100%{opacity:.94}}
+  #hud{left:14px;bottom:12px;right:14px;font-size:11px;letter-spacing:1px;color:#e2fdff;text-shadow:0 0 6px #35c9db,0 0 2px #000;
+    pointer-events:none;opacity:0;transition:opacity .3s}
+  #hud.on{opacity:1}
+  /* LEDs: patch hides the baked glow, then we draw our own */
+  .patch{width:38px;height:38px;margin:-19px 0 0 -19px;border-radius:50%;background:radial-gradient(circle,#161c1f 0 45%,rgba(20,25,28,0) 100%)}
+  .led{width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;
+    background:radial-gradient(circle,#ff9a52 0 22%,rgba(255,110,30,.55) 40%,rgba(255,90,20,0) 70%);opacity:.14;transition:opacity .07s}
+  .led.lit{opacity:1}
+  .led.g{background:radial-gradient(circle,#9dffa9 0 22%,rgba(70,255,100,.55) 40%,rgba(40,220,80,0) 70%);opacity:1}
+  #btnp{width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:radial-gradient(circle,#14191c 0 55%,rgba(20,25,28,0) 100%)}
+  #btn{width:46px;height:46px;margin:-23px 0 0 -23px;border-radius:50%;
+    background:radial-gradient(circle,#ff7a3a 0 20%,rgba(255,80,20,.6) 42%,rgba(255,60,10,0) 70%);animation:pulse 2.6s infinite}
+  @keyframes pulse{50%{opacity:.65}}
+  #knob{left:532px;top:208px;width:64px;height:64px;border-radius:50%;
+    background:url(tv.png) -532px -208px no-repeat;transition:transform .55s cubic-bezier(.3,1.5,.5,1)}
+  #power{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#000;z-index:9;cursor:pointer;
+    letter-spacing:4px;font-size:15px;color:#8fe6f0;text-shadow:0 0 8px #35c9db}
+  #power small{margin-top:14px;opacity:.5;letter-spacing:2px;font-size:11px}
+  #power.gone{display:none}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="specwrap" class="abs"><canvas id="spec" width="424" height="134"></canvas></div>
+  <div id="knob" class="abs"></div>
+  <div id="btn" class="abs" style="left:562px;top:405px"></div>
+  <div id="screenwrap" class="abs">
+    <canvas id="screen" width="345" height="276"></canvas>
+    <div id="glass"></div>
+    <div id="hud" class="abs"></div>
+  </div>
+</div>
+<video id="vid" playsinline preload="auto" style="display:none"></video>
+<audio id="aud" preload="auto" style="display:none"></audio>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const stage = $('#stage');
+  const fit = () => {
+    const s = Math.min(innerWidth / 701, innerHeight / 558);
+    stage.style.transform = `translate(${(innerWidth - 701 * s) / 2}px,${(innerHeight - 558 * s) / 2}px) scale(${s})`;
+  };
+  addEventListener('resize', fit); fit();
+
+  // ---- colors sampled from the original: video = dark -> light teal, static = bright cyan-blue
+  const mk = (a, b, gamma) => {
+    const t = new Uint8ClampedArray(256 * 3);
+    for (let i = 0; i < 256; i++) { const k = Math.pow(i / 255, gamma); for (let c = 0; c < 3; c++) t[i * 3 + c] = a[c] + (b[c] - a[c]) * k; }
+    return t;
+  };
+  const lutV = mk([8, 20, 22], [190, 238, 240], 0.95);
+  const lutS = mk([58, 134, 150], [152, 216, 224], 1);
+
+  const sc = $('#screen'), sx = sc.getContext('2d', { willReadFrequently: true });
+  const W = sc.width, H = sc.height;
+  const off = document.createElement('canvas'); off.width = W; off.height = H;
+  const ox = off.getContext('2d', { willReadFrequently: true });
+  const img = sx.createImageData(W, H);
+  const vid = $('#vid'), aud = $('#aud');
+
+  let mode = 'static', burst = 0;
+
+  const blot = document.createElement('canvas'); blot.width = 46; blot.height = 37;
+  const bx = blot.getContext('2d'); const bimg = bx.createImageData(46, 37);
+  const coarse = document.createElement('canvas'); coarse.width = 115; coarse.height = 92;
+  const cx = coarse.getContext('2d'); const cimg = cx.createImageData(115, 92);
+  const fine = document.createElement('canvas'); fine.width = W; fine.height = H;
+  const fx = fine.getContext('2d'); const fimg = fx.createImageData(W, H);
+  function drawStatic() {
+    // layer 0: large slow blotches, layer 1: mid cloud, layer 2: fine grain
+    let d = bimg.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      d[i] = lutS[v * 3]; d[i + 1] = lutS[v * 3 + 1]; d[i + 2] = lutS[v * 3 + 2]; d[i + 3] = 255;
+    }
+    bx.putImageData(bimg, 0, 0);
+    sx.imageSmoothingEnabled = true; sx.globalAlpha = 1;
+    sx.drawImage(blot, 0, 0, W, H);
+    d = cimg.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      d[i] = lutS[v * 3]; d[i + 1] = lutS[v * 3 + 1]; d[i + 2] = lutS[v * 3 + 2]; d[i + 3] = 255;
+    }
+    cx.putImageData(cimg, 0, 0);
+    sx.globalAlpha = 0.6; sx.drawImage(coarse, 0, 0, W, H);
+    d = fimg.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      d[i] = lutS[v * 3]; d[i + 1] = lutS[v * 3 + 1]; d[i + 2] = lutS[v * 3 + 2]; d[i + 3] = 255;
+    }
+    fx.putImageData(fimg, 0, 0);
+    sx.globalAlpha = 0.4; sx.drawImage(fine, 0, 0); sx.globalAlpha = 1;
+  }
+
+  // --- static-only "signal lock": static swells over the picture, then gradually settles. No shake, no roll.
+  let lockT0 = 0, swells = [];
+  function startLock() {
+    lockT0 = performance.now(); swells = [];
+    for (let t = 9 + Math.random() * 5; t < 900; t += 8 + Math.random() * 10) swells.push({ t, p: 0.25 + Math.random() * 0.35, up: 0.5 + Math.random() * 0.6, down: 1.5 + Math.random() * 2 });
+  }
+  function staticAmt() {
+    const t = (performance.now() - lockT0) / 1000;
+    let S = t < 2.2 ? 0.15 + 0.8 * Math.pow(t / 2.2, 1.5)                 // static builds up
+          : 0.95 * Math.exp(-(t - 2.2) / 3.2);                              // then gradually settles
+    for (let i = 0; i < swells.length; i++) {                               // later: occasional gentle swells
+      const g = swells[i], dt = t - g.t;
+      if (dt >= 0 && dt < g.up + g.down) S = Math.max(S, g.p * (dt < g.up ? dt / g.up : 1 - (dt - g.up) / g.down));
+    }
+    return Math.min(1, S + 0.03);
+  }
+
+  function drawVideo() {
+    const vw = vid.videoWidth, vh = vid.videoHeight;
+    if (!vw) return drawStatic();
+    const r = Math.min(W / vw, H / vh), w = vw * r, h = vh * r;
+    ox.fillStyle = '#000'; ox.fillRect(0, 0, W, H);
+    ox.drawImage(vid, (W - w) / 2, (H - h) / 2, w, h);
+    const f = ox.getImageData(0, 0, W, H), s = f.data, d = img.data;
+    const S = staticAmt(), gain = 1 - 0.3 * S, lift = 14 * S;
+    for (let y = 0; y < H; y++) {
+      const a = Math.min(1, (0.03 + 0.9 * Math.pow(S, 1.15)) * (0.8 + 0.4 * Math.random())), ia = 1 - a;   // per-line density flicker
+      let o = y * W * 4, i = y * W * 4;
+      for (let x = 0; x < W; x++, o += 4, i += 4) {
+        let g = (s[i] * 0.3 + s[i + 1] * 0.59 + s[i + 2] * 0.11) * gain + lift + (Math.random() * 18 - 9);
+        const gi = g < 0 ? 0 : g > 255 ? 255 : g | 0, ri = (Math.random() * 255) | 0;
+        d[o] = lutV[gi * 3] * ia + lutS[ri * 3] * a;
+        d[o + 1] = lutV[gi * 3 + 1] * ia + lutS[ri * 3 + 1] * a;
+        d[o + 2] = lutV[gi * 3 + 2] * ia + lutS[ri * 3 + 2] * a;
+        d[o + 3] = 255;
+      }
+    }
+    sx.putImageData(img, 0, 0);
+  }
+
+  function drawAudioScreen() {
+    drawStatic();
+    sx.strokeStyle = 'rgba(235,255,255,.95)'; sx.lineWidth = 2; sx.shadowColor = '#35c9db'; sx.shadowBlur = 8;
+    sx.beginPath();
+    for (let x = 0; x < W; x += 2) {
+      const i = Math.floor(x / W * td.length);
+      const y = H / 2 + ((td[i] - 128) / 128) * (H * 0.38);
+      x ? sx.lineTo(x, y) : sx.moveTo(x, y);
+    }
+    sx.stroke(); sx.shadowBlur = 0;
+  }
+
+  // ---- audio graph
+  let ac, an, fd, td;
+  const spec = $('#spec'), px = spec.getContext('2d');
+  // Uploaded audio is processed to sit with the background audio: mono, same band (about 130 Hz-5.5 kHz, mid-forward),
+  // auto-levelled to a fixed loudness, compressed, lightly saturated and limited.
+  let mediaIn;
+  function buildMediaChain() {
+    mediaIn = ac.createGain(); mediaIn.channelCount = 1; mediaIn.channelCountMode = 'explicit'; mediaIn.channelInterpretation = 'speakers';
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 130; hp.Q.value = 0.7;
+    const hp2 = ac.createBiquadFilter(); hp2.type = 'highpass'; hp2.frequency.value = 140; hp2.Q.value = 0.7;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5500; lp.Q.value = 0.7;
+    const mid = ac.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1300; mid.Q.value = 0.9; mid.gain.value = 4;
+    const agc = ac.createGain();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -42; comp.knee.value = 6; comp.ratio.value = 20; comp.attack.value = 0.002; comp.release.value = 0.12;
+    const comp2 = ac.createDynamicsCompressor(); comp2.threshold.value = -34; comp2.knee.value = 4; comp2.ratio.value = 20; comp2.attack.value = 0.001; comp2.release.value = 0.08;
+    const sat = ac.createWaveShaper(); const cv = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; cv[i] = Math.tanh(2 * x) / Math.tanh(2); } sat.curve = cv;
+    const out = ac.createGain(); out.gain.value = 0.21;
+    const lim = ac.createDynamicsCompressor(); lim.threshold.value = -6; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.08;
+    mediaIn.connect(hp); hp.connect(hp2); hp2.connect(lp); lp.connect(mid); mid.connect(agc); agc.connect(comp); comp.connect(comp2); comp2.connect(sat); sat.connect(out); out.connect(lim); lim.connect(an);
+    // simple auto-gain: measure the level before the gain stage, steer it to a fixed target (fast down, slow up)
+    const lvl = ac.createAnalyser(); lvl.fftSize = 2048; mid.connect(lvl);
+    const buf = new Float32Array(lvl.fftSize); let cur = 1, last = performance.now();
+    setInterval(() => {
+      lvl.getFloatTimeDomainData(buf); let sq = 0; for (let i = 0; i < buf.length; i++) sq += buf[i] * buf[i];
+      const rms = Math.sqrt(sq / buf.length), now = performance.now(), dt = (now - last) / 1000; last = now;
+      if (rms < 0.004) return;                                   // silence: hold
+      const want = Math.min(10, Math.max(0.05, AGC_TARGET / rms));
+      cur += (want - cur) * (1 - Math.exp(-dt / (want < cur ? 0.08 : 0.35)));
+      agc.gain.setTargetAtTime(cur, ac.currentTime, 0.03);
+    }, 40);
+  }
+  function initAudio() {
+    if (ac) return;
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    an = ac.createAnalyser(); an.fftSize = 512; an.smoothingTimeConstant = 0.45;
+    fd = new Uint8Array(an.frequencyBinCount); td = new Uint8Array(an.fftSize);
+    an.connect(ac.destination);
+    buildMediaChain();
+    for (const el of [vid, aud]) ac.createMediaElementSource(el).connect(mediaIn);
+  }
+  
+  let idleT = 0, idleBars = new Float32Array(111);
+  // Mirrored spectrum like the original: loud at both edges (bass), dipping to a V in the centre.
+  const NB = 140, cur = new Float32Array(NB), tgt = new Float32Array(NB), idle = new Float32Array(NB);
+  let idleStamp = 0;
+  function drawSpec() {
+    const w = spec.width, h = spec.height, base = Math.round(h * 0.74), bw = w / NB;
+    const active = mode !== 'static' && an;
+    if (active) an.getByteFrequencyData(fd), an.getByteTimeDomainData(td);
+    if (performance.now() - idleStamp > 60) {          // idle: synthetic "signal", same shape
+      idleStamp = performance.now();
+      for (let i = 0; i < NB; i++) {
+        const k = 1 - Math.abs(i - (NB - 1) / 2) / ((NB - 1) / 2);   // 0 at edges, 1 at centre
+        const env = 0.34 + 0.62 * Math.pow(1 - k, 0.7);
+        const r = Math.random();
+        idle[i] = Math.min(1, env * (r < 0.18 ? 1.05 : 0.2 + 0.7 * Math.pow(Math.random(), 0.9)));
+      }
+    }
+    let sum = 0;
+    for (let i = 0; i < NB; i++) {
+      tgt[i] = idle[i];
+      if (active) {
+        const k = 1 - Math.abs(i - (NB - 1) / 2) / ((NB - 1) / 2);
+        const bin = Math.min(fd.length - 1, 1 + Math.floor(Math.pow(k, 1.5) * 130));
+        tgt[i] = Math.min(1, Math.max(idle[i] * 0.75, (fd[bin] / 255) * 1.45 * (0.8 + Math.random() * 0.4)));
+      }
+      cur[i] += (tgt[i] - cur[i]) * 0.8;
+      sum += cur[i];
+    }
+    px.clearRect(0, 0, w, h);
+    const g = px.createLinearGradient(0, 0, 0, base);
+    g.addColorStop(0, '#4fb0c0'); g.addColorStop(1, '#78d2dc');
+    px.fillStyle = g;
+    for (let i = 0; i < NB; i++) {
+      const bh = Math.max(3, cur[i] * base * 0.95);
+      px.fillRect(i * bw, base - bh, bw + 0.6, bh);
+    }
+    px.fillStyle = '#2f8895'; px.fillRect(0, base, w, 3);        // darker line under the fill, like the original
+    px.fillStyle = 'rgba(120,215,225,.35)'; px.fillRect(0, base - 3, w, 3);
+  }
+
+  // ---- ambience bed (from the original footage): plays on static, ducks out during transmissions
+  const AGC_TARGET = 0.04; const AMB_VOL = 0.9; let ambBuf, ambGain, ambSrc, ambOn = true, alertBuf;
+  async function loadAlert() {
+    try { const r = await fetch('alert.wav'); alertBuf = await ac.decodeAudioData(await r.arrayBuffer()); }
+    catch (e) { console.warn('alert unavailable', e); }
+  }
+  // equal-power fade curve (keeps the static level steady when two noise beds cross-fade)
+  const eq = (from, to) => { const n = 48, c = new Float32Array(n); for (let i = 0; i < n; i++) { const p = i / (n - 1); c[i] = to >= from ? from + (to - from) * Math.sin(p * Math.PI / 2) : to + (from - to) * Math.cos(p * Math.PI / 2); } return c; };
+  // The "new transmission" alert = 8 s of the original opening (static lead-in, jingle, static tail).
+  // It cross-fades in over the idle ambience, so the change of tone isn't noticeable.
+  function playAlert() {
+    if (!alertBuf) return 0;
+    const t = ac.currentTime + 0.02, d = alertBuf.duration, fin = 0.35, fout = 0.4;
+    const src = ac.createBufferSource(); src.buffer = alertBuf;
+    const g = ac.createGain(); g.gain.setValueAtTime(0, t);
+    g.gain.setValueCurveAtTime(eq(0, AMB_VOL), t, fin);
+    g.gain.setValueCurveAtTime(eq(AMB_VOL, 0), t + d - fout, fout);
+    src.connect(g); g.connect(an); src.start(t);
+    return d;
+  }
+  async function loadAmbience() {
+    loadAlert();
+    try {
+      const r = await fetch('ambience.wav'); ambBuf = await ac.decodeAudioData(await r.arrayBuffer());
+      ambGain = ac.createGain(); ambGain.gain.value = 0;
+      ambSrc = ac.createBufferSource(); ambSrc.buffer = ambBuf; ambSrc.loop = true;
+      ambSrc.connect(ambGain); ambGain.connect(ac.destination);
+      ambSrc.start(0, Math.random() * ambBuf.duration);
+      setAmb(ambOn, 1.2);
+    } catch (e) { console.warn('ambience unavailable', e); }
+  }
+  function setAmb(on, secs, vol = AMB_VOL) {
+    ambOn = on; if (!ambGain) return;
+    const t = ac.currentTime, from = ambGain.gain.value, to = on ? vol : 0;
+    ambGain.gain.cancelScheduledValues(t); ambGain.gain.setValueAtTime(from, t);
+    if (from === to) return;
+    ambGain.gain.setValueCurveAtTime(eq(from, to), t, secs);
+  }
+  window.__nova6 = { skipAlert: false,
+    capStart() { const dest = ac.createMediaStreamDestination(); an.connect(dest); const rec = new MediaRecorder(dest.stream); const ch = []; rec.ondataavailable = (e) => ch.push(e.data); rec.start(); window.__rec = { rec, ch }; return performance.now(); },
+    capStop() { return new Promise((res) => { const { rec, ch } = window.__rec; rec.onstop = async () => { const u = new Uint8Array(await new Blob(ch).arrayBuffer()); let s = ''; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode.apply(null, u.subarray(i, i + 8192)); res(btoa(s)); }; rec.stop(); }); },
+    get now() { return performance.now(); },
+    get mode() { return mode; }, get jingle() { return !!alertBuf; }, get amb() { return ambGain ? ambGain.gain.value : -1; }, get loaded() { return !!ambBuf; } };
+
+  // ---- queue
+  const hud = $('#hud'), knob = $('#knob');
+  let line = [], curr = null, count = 0, rot = 0;
+  const setHud = (t) => { hud.textContent = t || ''; hud.classList.toggle('on', !!t); };
+  const spin = () => { rot += 60 + Math.random() * 90; knob.style.transform = `rotate(${rot}deg)`; };
+
+  // An upload moves through: incoming (alert starts) -> clip arrives -> alert finishes -> clip plays.
+  function next() { if (curr || !line.length) return; curr = line.shift(); count++; runAlert(curr); }
+  function runAlert(e) {
+    burst = 22; spin(); mode = 'jingle'; setAmb(false, 0.35);
+    if (window.__nova6 && window.__nova6.skipAlert) { e.alertDone = true; return tryStart(e); }
+    const d = playAlert();
+    e.alertTimer = setTimeout(() => { e.alertDone = true; tryStart(e); }, d * 1000);
+  }
+  function tryStart(e) {
+    if (curr !== e || e.started) return;
+    if (e.cancelled) return finish(e);
+    if (e.item) return startMedia(e);
+    mode = 'static'; burst = 10; setAmb(true, 0.6);          // alert over but still uploading: static + ambience
+    e.waitTimer = setTimeout(() => { if (curr === e && !e.item) finish(e); }, 15 * 60 * 1000);
+  }
+  function finish(e) {
+    clearTimeout(e.alertTimer); clearTimeout(e.waitTimer);
+    if (curr !== e) return;
+    curr = null; mode = 'static'; burst = 14; setHud(''); spin();
+    if (!line.length) setAmb(true, 0.8);
+    setTimeout(next, 700);
+  }
+  function startMedia(e) {
+    e.started = true; clearTimeout(e.waitTimer);
+    const item = e.item; burst = 14; spin(); setAmb(false, 0.3);
+    const el = item.type === 'video' ? vid : aud;
+    el.src = RAW + 'media/' + item.file;
+    const done = () => { el.onended = el.onerror = null; el.pause(); el.removeAttribute('src'); el.load(); finish(e); };
+    el.onended = done; el.onerror = done;
+    const go = () => setTimeout(() => {
+      if (curr !== e) return;
+      mode = item.type; if (item.type === 'video') startLock();
+      setHud(`TRANSMISSION ${String(count).padStart(3, '0')} // LIVE` + (item.caption ? '  ' + item.caption : ''));
+    }, 350);
+    el.play().then(go).catch(err => {
+      if (err && err.name === 'NotAllowedError') {            // browser blocks sound until first interaction: wait for it, then play
+        const retry = () => { removeEventListener('pointerdown', retry); removeEventListener('keydown', retry); if (curr === e) el.play().then(go).catch(done); };
+        addEventListener('pointerdown', retry); addEventListener('keydown', retry);
+      } else done();
+    });
+  }
+
+  let started = false;
+  const onMsg = (m) => {
+    if (!started) return;
+    if (m.type === 'incoming') { line.push({ id: m.id, item: null }); next(); }
+    else if (m.type === 'new') {
+      const e = curr && curr.id === m.item.id ? curr : line.find((x) => x.id === m.item.id);
+      if (e) { e.item = m.item; if (e === curr && e.alertDone) tryStart(e); }
+      else { line.push({ id: m.item.id, item: m.item }); next(); }   // no early notice: alert, then clip
+    } else if (m.type === 'cancel') {
+      const i = line.findIndex((x) => x.id === m.id);
+      if (i >= 0) line.splice(i, 1);
+      else if (curr && curr.id === m.id && !curr.started) { curr.cancelled = true; if (curr.alertDone) finish(curr); }
+    }
+  };
+  // GitHub mode: the sender commits media + manifest.json to the repo; this page polls the manifest (no server needed).
+  const REPO = 'brayden452861-stack/transmission', BRANCH = 'main';
+  const RAW = 'https://raw.githubusercontent.com/' + REPO + '/' + BRANCH + '/';
+  const seen = new Set(); let primed = false;
+  async function poll() {
+    try {
+      const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
+      if (r.ok) {
+        const items = (await r.json()).items || [];
+        if (!primed) { items.forEach((i) => seen.add(i.id)); primed = true; }       // don't replay old transmissions on page load
+        else items.forEach((i) => { if (!seen.has(i.id)) { seen.add(i.id); onMsg({ type: 'new', item: i }); } });
+      }
+    } catch {}
+    setTimeout(poll, 15000);
+  }
+  poll();
+
+  (function frame() {
+    if (burst > 0) { drawStatic(); burst--; }
+    else if (mode === 'video') drawVideo();
+    else if (mode === 'audio') drawAudioScreen();
+    else drawStatic();
+    drawSpec();
+    requestAnimationFrame(frame);
+  })();
+
+  // opens straight onto the screen: no menu. Browsers keep sound suspended until the first click/key/touch, so resume then.
+  started = true; initAudio(); loadAmbience(); burst = 20; spin();
+  const wake = () => { if (ac.state !== 'running') ac.resume(); };
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev => addEventListener(ev, wake, { passive: true }));
+  ac.onstatechange = () => { if (ac.state === 'running') ['pointerdown', 'keydown', 'touchstart'].forEach(ev => removeEventListener(ev, wake)); };
+})();
+</script>
+</body>
+</html>
