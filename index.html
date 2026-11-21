@@ -383,31 +383,52 @@
   // ids already shown on this browser are remembered, so a reload doesn't replay them; anything sent in the last 15 min that this browser hasn't shown yet plays
   let shown = new Set(); try { shown = new Set(JSON.parse(localStorage.getItem('nova6shown') || '[]')); } catch {}
   const remember = (id) => { shown.add(id); try { localStorage.setItem('nova6shown', JSON.stringify([...shown].slice(-100))); } catch {} };
-  let primed = false, pollMs = 333, okRun = 0;      // 3 checks per second; backs off automatically if GitHub pushes back (HTTP 403/429/5xx)
-  async function poll() {
-    try {
-      const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
-      if (r.ok) {
-        const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
-        let hi = 0; try { hi = +localStorage.getItem('nova6intr') || 0; } catch {}
-        if (intr > hi) {
-          try { localStorage.setItem('nova6intr', String(intr)); } catch {}
-          if (primed || nowS - intr < 300) interruptAll();                               // a fresh interrupt: clear everything
-        }
-        items.forEach((i) => {
-          if (shown.has(i.id)) return;
-          if ((i.ts || 0) <= intr) { remember(i.id); return; }                          // sent before the interrupt: dropped
-          remember(i.id);
-          if (primed || nowS - (i.ts || 0) < 900) dbg('queued ' + i.file), onMsg({ type: 'new', item: i });     // new, or sent within the last 15 minutes
-        });
-        primed = true;
-      }
-      if (r.ok) { okRun++; if (okRun > 20 && pollMs > 333) pollMs = Math.max(333, pollMs / 2); }
-      else { okRun = 0; pollMs = Math.min(15000, Math.max(pollMs * 2, r.status === 429 || r.status === 403 ? 10000 : 1000)); dbg('poll HTTP ' + r.status + ', slowing to ' + pollMs + ' ms'); }
-    } catch (err) { okRun = 0; pollMs = Math.min(15000, pollMs * 2); dbg('poll failed: ' + err.message); }
-    setTimeout(poll, pollMs);
+  let primed = false, lastOk = 0, nChecks = 0;
+  const BUILD = 'v7-worker-poll';
+  function handleManifest(man) {
+    const items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
+    let hi = 0; try { hi = +localStorage.getItem('nova6intr') || 0; } catch {}
+    if (intr > hi) {
+      try { localStorage.setItem('nova6intr', String(intr)); } catch {}
+      if (primed || nowS - intr < 300) { dbg('interrupt received'); interruptAll(); }       // a fresh interrupt: clear everything
+    }
+    items.forEach((i) => {
+      if (shown.has(i.id)) return;
+      remember(i.id);
+      if ((i.ts || 0) <= intr) return;                                                     // sent before the interrupt: dropped
+      if (primed || nowS - (i.ts || 0) < 900) { dbg('queued ' + i.file); onMsg({ type: 'new', item: i }); }   // new, or sent within the last 15 minutes
+    });
+    primed = true;
   }
-  poll();
+  // The checking loop runs in a Web Worker: browsers throttle timers in background tabs, but not in workers.
+  // 3 checks per second; backs off automatically if GitHub pushes back (HTTP 403/429/5xx).
+  const workerSrc = `
+    let ms = 333, okRun = 0;
+    async function loop(url) {
+      try {
+        const r = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+        if (r.ok) { postMessage({ ok: true, man: await r.json() }); okRun++; if (okRun > 20 && ms > 333) ms = Math.max(333, ms / 2); }
+        else { okRun = 0; ms = Math.min(15000, Math.max(ms * 2, (r.status === 429 || r.status === 403) ? 10000 : 1000)); postMessage({ ok: false, msg: 'HTTP ' + r.status + ', slowing to ' + ms + ' ms' }); }
+      } catch (e) { okRun = 0; ms = Math.min(15000, ms * 2); postMessage({ ok: false, msg: 'failed: ' + e.message }); }
+      setTimeout(() => loop(url), ms);
+    }
+    onmessage = (e) => loop(e.data);
+  `;
+  function startWorker() {
+    const w = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+    w.onmessage = (e) => {
+      if (e.data.ok) { lastOk = Date.now(); nChecks++; try { handleManifest(e.data.man); } catch (err) { dbg('manifest error: ' + err.message); } }
+      else dbg('check ' + e.data.msg);
+    };
+    w.onerror = (e) => { dbg('worker error: ' + e.message + ' - falling back'); fallbackPoll(); };
+    w.postMessage(RAW + 'manifest.json');
+  }
+  async function fallbackPoll() {           // used only if workers are unavailable
+    try { const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' }); if (r.ok) { lastOk = Date.now(); nChecks++; handleManifest(await r.json()); } } catch {}
+    setTimeout(fallbackPoll, 1000);
+  }
+  try { startWorker(); } catch (err) { dbg('no worker: ' + err.message); fallbackPoll(); }
+  if (DEBUG) setInterval(() => { dbgEl.textContent = BUILD + ' | last good check ' + (lastOk ? ((Date.now() - lastOk) / 1000).toFixed(1) + 's ago' : 'NONE yet') + ' | checks ' + nChecks + '\n' + dbgLines.join('\n'); }, 500);
 
   (function frame() {
     if (burst > 0) { drawStatic(); burst--; }
