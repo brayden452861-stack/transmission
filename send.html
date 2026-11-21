@@ -21,7 +21,7 @@ input[type=text],input[type=password]{width:100%;box-sizing:border-box;backgroun
 <button id="intr">INTERRUPT ALL (stop playing &amp; clear the queue)</button>
 <div id="log"></div></div>
 <script>
-const REPO='brayden452861-stack/transmission', BR='main', API='https://api.github.com/repos/'+REPO+'/contents/';
+const REPO='brayden452861-stack/transmission', BR='media', API='https://api.github.com/repos/'+REPO+'/contents/';
 const $=s=>document.querySelector(s), log=(t,c)=>{$('#log').innerHTML='<span class="'+(c||'')+'">'+t.replace(/</g,'&lt;')+'</span>'};
 try{$('#tok').value=localStorage.getItem('nova6tok')||''}catch{}
 const b64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(f)});

@@ -16,7 +16,7 @@ try {
   $sizeMB = $len / 1MB
   if ($sizeMB -gt 50) { throw ("That file is {0:N0} MB. GitHub mode allows 50 MB - shrink it first." -f $sizeMB) }
   $caption = Read-Host 'Caption to show on screen (press Enter to skip)'
-  $repo = $cfg.repo; $br = if ($cfg.branch) { $cfg.branch } else { 'main' }
+  $repo = $cfg.repo; $br = if ($cfg.branch) { $cfg.branch } else { 'media' }
   $h = @{ Authorization = "Bearer $($cfg.token)"; 'User-Agent' = 'nova6-sender'; Accept = 'application/vnd.github+json' }
   $id = [guid]::NewGuid().ToString('N').Substring(0,10)
   $fname = "$id$ext"

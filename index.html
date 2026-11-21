@@ -378,7 +378,7 @@
     }
   };
   // GitHub mode: the sender commits media + manifest.json to the repo; this page polls the manifest (no server needed).
-  const REPO = 'brayden452861-stack/transmission', BRANCH = 'main';
+  const REPO = 'brayden452861-stack/transmission', BRANCH = 'media';
   const RAW = 'https://raw.githubusercontent.com/' + REPO + '/' + BRANCH + '/';
   // ids already shown on this browser are remembered, so a reload doesn't replay them; anything sent in the last 15 min that this browser hasn't shown yet plays
   let shown = new Set(); try { shown = new Set(JSON.parse(localStorage.getItem('nova6shown') || '[]')); } catch {}
