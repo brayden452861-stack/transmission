@@ -357,14 +357,21 @@
   // GitHub mode: the sender commits media + manifest.json to the repo; this page polls the manifest (no server needed).
   const REPO = 'brayden452861-stack/transmission', BRANCH = 'main';
   const RAW = 'https://raw.githubusercontent.com/' + REPO + '/' + BRANCH + '/';
-  const seen = new Set(); let primed = false;
+  // ids already shown on this browser are remembered, so a reload doesn't replay them; anything sent in the last 15 min that this browser hasn't shown yet plays
+  let shown = new Set(); try { shown = new Set(JSON.parse(localStorage.getItem('nova6shown') || '[]')); } catch {}
+  const remember = (id) => { shown.add(id); try { localStorage.setItem('nova6shown', JSON.stringify([...shown].slice(-100))); } catch {} };
+  let primed = false;
   async function poll() {
     try {
       const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) {
-        const items = (await r.json()).items || [];
-        if (!primed) { items.forEach((i) => seen.add(i.id)); primed = true; }       // don't replay old transmissions on page load
-        else items.forEach((i) => { if (!seen.has(i.id)) { seen.add(i.id); onMsg({ type: 'new', item: i }); } });
+        const items = (await r.json()).items || [], nowS = Date.now() / 1000;
+        items.forEach((i) => {
+          if (shown.has(i.id)) return;
+          remember(i.id);
+          if (primed || nowS - (i.ts || 0) < 900) onMsg({ type: 'new', item: i });     // new, or sent within the last 15 minutes
+        });
+        primed = true;
       }
     } catch {}
     setTimeout(poll, 15000);
