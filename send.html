@@ -35,9 +35,8 @@ async function send(f){
     if(ext!=='.mp3'&&ext!=='.mp4')throw new Error('Only .mp3 and .mp4 files.');
     if(f.size>50*1048576)throw new Error('File is over 50 MB.');
     const id=Math.random().toString(36).slice(2,12),name=id+ext;
-    log('Uploading '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB) ...');
-    await gh(API+'media/'+name,{method:'PUT',headers:hdr(),body:JSON.stringify({message:'transmission '+id,branch:BR,content:await b64(f)})});
-    log('Adding to the transmission list ...');
+    log('Announcing transmission ...');
+    // 1) list it first (tiny, quick): screens start the alert right away and the clip arrives while the alert plays
     for(let t=0;t<5;t++){
       const m=await gh(API+'manifest.json?ref='+BR+'&t='+Date.now(),{headers:hdr()});
       let man={};try{man=JSON.parse(decodeURIComponent(escape(atob(m.content.replace(/\s/g,'')))))}catch{}
@@ -45,8 +44,11 @@ async function send(f){
       items.push({id,file:name,type:ext==='.mp4'?'video':'audio',caption:$('#cap').value,ts:Math.floor(Date.now()/1000)});
       items=items.slice(-40);
       try{await gh(API+'manifest.json',{method:'PUT',headers:hdr(),body:JSON.stringify({message:'manifest '+id,branch:BR,sha:m.sha,content:btoa(unescape(encodeURIComponent(JSON.stringify(Object.assign(man,{items})))))})});break}
-      catch(e){if(t===4)throw e;await new Promise(r=>setTimeout(r,1000))}
+      catch(e){if(t===4)throw e;await new Promise(r=>setTimeout(r,500))}
     }
+    // 2) then upload the file itself
+    log('Uploading '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB) ...');
+    await gh(API+'media/'+name,{method:'PUT',headers:hdr(),body:JSON.stringify({message:'transmission '+id,branch:BR,content:await b64(f)})});
     log('TRANSMISSION SENT. Open screens pick it up within ~15-30 seconds.','ok');
   }catch(e){log('FAILED: '+e.message,'err')}
 }

@@ -333,7 +333,8 @@
     e.started = true; clearTimeout(e.waitTimer);
     const item = e.item; burst = 14; spin(); setAmb(false, 0.3);
     const el = item.type === 'video' ? vid : aud;
-    el.src = RAW + 'media/' + item.file;
+    let tries = 0; const srcUrl = () => RAW + 'media/' + item.file + (tries ? '?r=' + Date.now() : '');
+    el.src = srcUrl();
     const done = () => { clearTimeout(e.playWatch); el.muted = false; el.onended = el.onerror = null; el.pause(); el.removeAttribute('src'); el.load(); finish(e); };
     el.onended = done; el.onerror = done;
     const go = () => { clearTimeout(e.playWatch); dbg('playing ' + item.file); setTimeout(() => {
@@ -342,16 +343,21 @@
       setHud(`TRANSMISSION ${String(count).padStart(3, '0')} // LIVE` + (item.caption ? '  ' + item.caption : ''));
     }, 350); };
     // watchdog: if the clip never starts (blocked, stalled download, bad file) give up so the queue can't jam
-    e.playWatch = setTimeout(() => { if (curr === e && mode !== item.type) { dbg('clip did not start, skipping ' + item.file); done(); } }, 45000);
+    e.playWatch = setTimeout(() => { if (curr === e && mode !== item.type) { dbg('clip did not start, skipping ' + item.file); done(); } }, 130000);
     const fail = (why) => { clearTimeout(e.playWatch); dbg('cannot play ' + item.file + ': ' + why); done(); };
-    el.onerror = () => fail('media error ' + (el.error ? el.error.code : '')); 
+    el.onerror = () => {                                       // the sender lists a clip before its upload finishes, so retry while it appears
+      if (curr !== e) return;
+      if (++tries <= 80) { dbg('clip not there yet, retry ' + tries); setTimeout(() => { if (curr === e) { el.src = srcUrl(); el.play().then(go).catch(() => {}); } }, 1500); }
+      else fail('media error ' + (el.error ? el.error.code : ''));
+    };
     el.play().then(go).catch(err => {
       if (err && err.name === 'NotAllowedError') {            // browser blocks sound until first interaction
         dbg('sound blocked - click the page');
         if (item.type === 'video') { el.muted = true; el.play().then(go).catch(() => fail('blocked')); }   // show the picture silently
         const unmute = () => { removeEventListener('pointerdown', unmute); removeEventListener('keydown', unmute); el.muted = false; if (item.type !== 'video' && curr === e) el.play().then(go).catch(() => fail('blocked')); };
         addEventListener('pointerdown', unmute); addEventListener('keydown', unmute);
-      } else fail(err && err.name);
+      } else if (err && (err.name === 'NotSupportedError' || err.name === 'AbortError')) { /* load error or source swapped: the onerror retry handles it */ }
+      else fail(err && err.name);
     });
   }
 
