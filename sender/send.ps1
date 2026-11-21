@@ -41,7 +41,7 @@ try {
     $parts = @(); foreach ($o in $old) { $parts += ($o | ConvertTo-Json -Compress) }
     $parts += $newItem
     if ($parts.Count -gt 40) { $parts = $parts[($parts.Count-40)..($parts.Count-1)] }
-    $json = '{"items":[' + ($parts -join ',') + ']}'
+    $json = '{"interrupt":' + $intr + ',"items":[' + ($parts -join ',') + ']}'
     $put = '{"message":"manifest ' + $id + '","branch":"' + $br + '","sha":"' + $m.sha + '","content":"' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)) + '"}'
     try { Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/manifest.json" -Method Put -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes($put)) -ContentType 'application/json' | Out-Null; break }
     catch { if ($try -eq 4) { throw }; Start-Sleep -Seconds 1 }

@@ -265,8 +265,13 @@
     const g = ac.createGain(); g.gain.setValueAtTime(0, t);
     g.gain.setValueCurveAtTime(eq(0, AMB_VOL), t, fin);
     g.gain.setValueCurveAtTime(eq(AMB_VOL, 0), t + d - fout, fout);
-    src.connect(g); g.connect(an); src.start(t);
+    src.connect(g); g.connect(an); src.start(t); alertNode = { src, g };
     return d;
+  }
+  let alertNode = null;
+  function stopAlert() {
+    if (!alertNode) return; const { src, g } = alertNode; alertNode = null;
+    try { g.gain.cancelScheduledValues(ac.currentTime); g.gain.setTargetAtTime(0, ac.currentTime, 0.04); src.stop(ac.currentTime + 0.25); } catch {}
   }
   async function loadAmbience() {
     loadAlert();
@@ -340,6 +345,14 @@
     });
   }
 
+  // Interrupt: stop everything that is playing or waiting, on this screen
+  function interruptAll() {
+    line.length = 0;
+    stopAlert();
+    for (const el of [vid, aud]) { try { el.onended = el.onerror = null; el.pause(); el.removeAttribute('src'); el.load(); } catch {} }
+    if (curr) { const e = curr; e.cancelled = true; e.started = true; finish(e); }
+    mode = 'static'; burst = 20; setHud(''); setAmb(true, 0.6);
+  }
   let started = false;
   const onMsg = (m) => {
     if (!started) return;
@@ -365,9 +378,15 @@
     try {
       const r = await fetch(RAW + 'manifest.json?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) {
-        const items = (await r.json()).items || [], nowS = Date.now() / 1000;
+        const man = await r.json(), items = man.items || [], nowS = Date.now() / 1000, intr = man.interrupt || 0;
+        let hi = 0; try { hi = +localStorage.getItem('nova6intr') || 0; } catch {}
+        if (intr > hi) {
+          try { localStorage.setItem('nova6intr', String(intr)); } catch {}
+          if (primed || nowS - intr < 300) interruptAll();                               // a fresh interrupt: clear everything
+        }
         items.forEach((i) => {
           if (shown.has(i.id)) return;
+          if ((i.ts || 0) <= intr) { remember(i.id); return; }                          // sent before the interrupt: dropped
           remember(i.id);
           if (primed || nowS - (i.ts || 0) < 900) onMsg({ type: 'new', item: i });     // new, or sent within the last 15 minutes
         });

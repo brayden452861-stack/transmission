@@ -8,6 +8,8 @@ label{display:block;font-size:11px;letter-spacing:2px;opacity:.7;margin:14px 0 4
 input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#06181b;border:1px solid #1f6f7a;color:#bff6fb;padding:9px;font:inherit}
 #drop{margin-top:18px;border:2px dashed #1f6f7a;padding:40px 10px;text-align:center;cursor:pointer}
 #drop.over{background:#06242a;border-color:#7fe3ee}
+#intr{margin-top:14px;width:100%;padding:10px;background:#2a0b08;border:1px solid #b34a3c;color:#ffb3a6;font:inherit;letter-spacing:1px;cursor:pointer}
+#intr:hover{background:#3d1510}
 #log{margin-top:16px;font-size:13px;white-space:pre-wrap;word-break:break-word}
 .err{color:#ff8a7a}.ok{color:#9ff5ff}
 </style></head><body><div class="box">
@@ -16,6 +18,7 @@ input[type=text],input[type=password]{width:100%;box-sizing:border-box;backgroun
 <label>CAPTION (optional)</label><input type="text" id="cap">
 <div id="drop">Drop an MP3 / MP4 here, or click to choose (max 50 MB)</div>
 <input type="file" id="file" accept=".mp3,.mp4,audio/mpeg,video/mp4" hidden>
+<button id="intr">INTERRUPT ALL (stop playing &amp; clear the queue)</button>
 <div id="log"></div></div>
 <script>
 const REPO='brayden452861-stack/transmission', BR='main', API='https://api.github.com/repos/'+REPO+'/contents/';
@@ -37,15 +40,31 @@ async function send(f){
     log('Adding to the transmission list ...');
     for(let t=0;t<5;t++){
       const m=await gh(API+'manifest.json?ref='+BR+'&t='+Date.now(),{headers:hdr()});
-      let items=[];try{items=JSON.parse(decodeURIComponent(escape(atob(m.content.replace(/\s/g,'')))) ).items||[]}catch{}
+      let man={};try{man=JSON.parse(decodeURIComponent(escape(atob(m.content.replace(/\s/g,'')))))}catch{}
+      let items=man.items||[];
       items.push({id,file:name,type:ext==='.mp4'?'video':'audio',caption:$('#cap').value,ts:Math.floor(Date.now()/1000)});
       items=items.slice(-40);
-      try{await gh(API+'manifest.json',{method:'PUT',headers:hdr(),body:JSON.stringify({message:'manifest '+id,branch:BR,sha:m.sha,content:btoa(unescape(encodeURIComponent(JSON.stringify({items}))))})});break}
+      try{await gh(API+'manifest.json',{method:'PUT',headers:hdr(),body:JSON.stringify({message:'manifest '+id,branch:BR,sha:m.sha,content:btoa(unescape(encodeURIComponent(JSON.stringify(Object.assign(man,{items})))))})});break}
       catch(e){if(t===4)throw e;await new Promise(r=>setTimeout(r,1000))}
     }
     log('TRANSMISSION SENT. Open screens pick it up within ~15-30 seconds.','ok');
   }catch(e){log('FAILED: '+e.message,'err')}
 }
+$('#intr').onclick=async()=>{
+  try{
+    if(!$('#tok').value.trim())throw new Error('Paste your GitHub token first.');
+    localStorage.setItem('nova6tok',$('#tok').value.trim());
+    log('Sending interrupt ...');
+    for(let t=0;t<5;t++){
+      const m=await gh(API+'manifest.json?ref='+BR+'&t='+Date.now(),{headers:hdr()});
+      let man={items:[]};try{man=JSON.parse(decodeURIComponent(escape(atob(m.content.replace(/\s/g,'')))))}catch{}
+      man.interrupt=Math.floor(Date.now()/1000);
+      try{await gh(API+'manifest.json',{method:'PUT',headers:hdr(),body:JSON.stringify({message:'interrupt',branch:BR,sha:m.sha,content:btoa(unescape(encodeURIComponent(JSON.stringify(man))))})});break}
+      catch(e){if(t===4)throw e;await new Promise(r=>setTimeout(r,1000))}
+    }
+    log('INTERRUPT SENT. Open screens stop and clear within ~15-30 seconds.','ok');
+  }catch(e){log('FAILED: '+e.message,'err')}
+};
 const d=$('#drop'),fi=$('#file');
 d.onclick=()=>fi.click();fi.onchange=()=>fi.files[0]&&send(fi.files[0]);
 d.ondragover=e=>{e.preventDefault();d.classList.add('over')};d.ondragleave=()=>d.classList.remove('over');
