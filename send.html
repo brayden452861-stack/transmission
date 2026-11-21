@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NOVA6 // SEND</title>
+<style>
+body{margin:0;min-height:100vh;background:#000;color:#7fe3ee;font-family:"Courier New",monospace;display:flex;justify-content:center;padding:30px 14px;box-sizing:border-box}
+.box{width:100%;max-width:520px}h1{font-size:18px;letter-spacing:3px;margin:0 0 18px}
+label{display:block;font-size:11px;letter-spacing:2px;opacity:.7;margin:14px 0 4px}
+input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#06181b;border:1px solid #1f6f7a;color:#bff6fb;padding:9px;font:inherit}
+#drop{margin-top:18px;border:2px dashed #1f6f7a;padding:40px 10px;text-align:center;cursor:pointer}
+#drop.over{background:#06242a;border-color:#7fe3ee}
+#log{margin-top:16px;font-size:13px;white-space:pre-wrap;word-break:break-word}
+.err{color:#ff8a7a}.ok{color:#9ff5ff}
+</style></head><body><div class="box">
+<h1>NOVA6 // SEND TRANSMISSION</h1>
+<label>GITHUB TOKEN (saved in this browser only)</label><input type="password" id="tok" autocomplete="off">
+<label>CAPTION (optional)</label><input type="text" id="cap">
+<div id="drop">Drop an MP3 / MP4 here, or click to choose (max 50 MB)</div>
+<input type="file" id="file" accept=".mp3,.mp4,audio/mpeg,video/mp4" hidden>
+<div id="log"></div></div>
+<script>
+const REPO='brayden452861-stack/transmission', BR='main', API='https://api.github.com/repos/'+REPO+'/contents/';
+const $=s=>document.querySelector(s), log=(t,c)=>{$('#log').innerHTML='<span class="'+(c||'')+'">'+t.replace(/</g,'&lt;')+'</span>'};
+try{$('#tok').value=localStorage.getItem('nova6tok')||''}catch{}
+const b64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(f)});
+const hdr=()=>({Authorization:'Bearer '+$('#tok').value.trim(),Accept:'application/vnd.github+json'});
+async function gh(url,opt){const r=await fetch(url,opt);if(!r.ok){let t='';try{t=(await r.json()).message}catch{}throw new Error(r.status+' '+(t||r.statusText))}return r.json()}
+async function send(f){
+  try{
+    if(!$('#tok').value.trim())throw new Error('Paste your GitHub token first.');
+    localStorage.setItem('nova6tok',$('#tok').value.trim());
+    const ext=(f.name.match(/\.[^.]+$/)||[''])[0].toLowerCase();
+    if(ext!=='.mp3'&&ext!=='.mp4')throw new Error('Only .mp3 and .mp4 files.');
+    if(f.size>50*1048576)throw new Error('File is over 50 MB.');
+    const id=Math.random().toString(36).slice(2,12),name=id+ext;
+    log('Uploading '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB) ...');
+    await gh(API+'media/'+name,{method:'PUT',headers:hdr(),body:JSON.stringify({message:'transmission '+id,branch:BR,content:await b64(f)})});
+    log('Adding to the transmission list ...');
+    for(let t=0;t<5;t++){
+      const m=await gh(API+'manifest.json?ref='+BR+'&t='+Date.now(),{headers:hdr()});
+      let items=[];try{items=JSON.parse(decodeURIComponent(escape(atob(m.content.replace(/\s/g,'')))) ).items||[]}catch{}
+      items.push({id,file:name,type:ext==='.mp4'?'video':'audio',caption:$('#cap').value,ts:Math.floor(Date.now()/1000)});
+      items=items.slice(-40);
+      try{await gh(API+'manifest.json',{method:'PUT',headers:hdr(),body:JSON.stringify({message:'manifest '+id,branch:BR,sha:m.sha,content:btoa(unescape(encodeURIComponent(JSON.stringify({items}))))})});break}
+      catch(e){if(t===4)throw e;await new Promise(r=>setTimeout(r,1000))}
+    }
+    log('TRANSMISSION SENT. Open screens pick it up within ~15-30 seconds.','ok');
+  }catch(e){log('FAILED: '+e.message,'err')}
+}
+const d=$('#drop'),fi=$('#file');
+d.onclick=()=>fi.click();fi.onchange=()=>fi.files[0]&&send(fi.files[0]);
+d.ondragover=e=>{e.preventDefault();d.classList.add('over')};d.ondragleave=()=>d.classList.remove('over');
+d.ondrop=e=>{e.preventDefault();d.classList.remove('over');e.dataTransfer.files[0]&&send(e.dataTransfer.files[0])};
+</script></body></html>
